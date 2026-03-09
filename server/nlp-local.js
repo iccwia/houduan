@@ -29,7 +29,7 @@ async function trainModel() {
     // 1. 加载意图 (来自 inquiry_scheme 表)
     // 此时 id=2 包含了 "提示" 和 "示例" 的所有关键词
     const [schemes] = await conn.execute(
-      "SELECT schemeId, keywords FROM inquiry_scheme"
+      "SELECT schemeId, keywords FROM inquiry_scheme",
     );
     schemes.forEach((scheme) => {
       if (!scheme.keywords) return;
@@ -44,7 +44,7 @@ async function trainModel() {
 
     // 2. 加载知识点实体 (来自 knowledge 表)
     const [knowledgeList] = await conn.execute(
-      "SELECT knowledgeName, keywords FROM knowledge"
+      "SELECT knowledgeName, keywords FROM knowledge",
     );
     CONCEPT_WHITELIST.clear();
 
@@ -73,7 +73,7 @@ async function trainModel() {
         ];
         // 意图 ID 1 对应数据库中的 STRATEGY_CONCEPT
         templates.forEach((t) =>
-          manager.addDocument("zh", t.replace("%s", term), "1")
+          manager.addDocument("zh", t.replace("%s", term), "1"),
         );
       });
     });
@@ -161,3 +161,4 @@ async function analyzeIntentLocal(message) {
 }
 
 module.exports = { trainModel, analyzeIntentLocal };
+//测试提交
