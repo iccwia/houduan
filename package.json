@@ -1,0 +1,9 @@
+{
+  "dependencies": {
+    "body-parser": "^2.2.2",
+    "cors": "^2.8.6",
+    "express": "^5.2.1",
+    "mysql2": "^3.16.1",
+    "node-nlp": "^5.0.0-alpha.5"
+  }
+}
