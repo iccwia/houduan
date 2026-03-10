@@ -25,7 +25,12 @@ const pool = mysql.createPool(dbConfig);
 const sessions = {};
 const getSession = (userId) => {
   if (!sessions[userId])
-    sessions[userId] = { questionId: 1, currentStepOrder: 1, counters: {} };
+    sessions[userId] = {
+      dbSessionId: null,
+      questionId: 1,
+      currentStepOrder: 1,
+      counters: {},
+    };
   return sessions[userId];
 };
 
@@ -71,7 +76,7 @@ async function executeStrategy(session, strategyId, userMessage) {
 
   const [res] = await pool.execute(
     "SELECT * FROM respond_strategy WHERE strategyId = ?",
-    [strategyId]
+    [strategyId],
   );
   if (res.length === 0) return "策略配置错误。";
 
@@ -81,7 +86,6 @@ async function executeStrategy(session, strategyId, userMessage) {
   switch (strategy.strategyType) {
     case "STRATEGY_CONCEPT":
       let k = [];
-      // 🔴 新增：判定用户的话是否是模糊的代词或短语
       const vagueWords = [
         "这",
         "这个",
@@ -95,48 +99,32 @@ async function executeStrategy(session, strategyId, userMessage) {
       const isVague =
         vagueWords.includes(userMessage.trim()) || userMessage.length < 2;
 
-      // 阶段 1：如果不是模糊提问，尝试精准查询知识点
       if (!isVague) {
         const [exactRes] = await pool.execute(
-          `
-          SELECT * FROM knowledge 
-          WHERE keywords != '' AND (
-             ? LIKE CONCAT('%', keywords, '%') 
-             OR keywords LIKE CONCAT('%', ?, '%')
-             OR ? LIKE CONCAT('%', knowledgeName, '%')
-          ) LIMIT 1
-        `,
-          [userMessage, userMessage, userMessage]
+          `SELECT * FROM knowledge WHERE keywords != '' AND (? LIKE CONCAT('%', keywords, '%') OR keywords LIKE CONCAT('%', ?, '%') OR ? LIKE CONCAT('%', knowledgeName, '%')) LIMIT 1`,
+          [userMessage, userMessage, userMessage],
         );
         k = exactRes;
       }
 
-      // 阶段 2：如果精准查询失败，或者用户提问模糊 (如：这是什么)，进行【上下文推断】
       if (k.length === 0) {
-        // 2.1 尝试通过问题步骤绑定表 (problem_step_knowledge) 找对应的知识点
         const [ctxRes] = await pool.execute(
-          `
-          SELECT k.* FROM knowledge k
-          JOIN problem_step_knowledge psk ON k.knowledgeId = psk.knowledgeId
-          WHERE psk.problemId = ? AND psk.stepId = ? LIMIT 1
-          `,
-          [questionId, currentStepOrder]
+          `SELECT k.* FROM knowledge k JOIN problem_step_knowledge psk ON k.knowledgeId = psk.knowledgeId WHERE psk.problemId = ? AND psk.stepId = ? LIMIT 1`,
+          [questionId, currentStepOrder],
         );
-
         if (ctxRes.length > 0) {
           k = ctxRes;
-          k[0].isContextual = true; // 打上上下文标记
+          k[0].isContextual = true;
         } else {
-          // 2.2 如果没硬绑定，智能读取当前步骤的文字进行反向提取 (如：步骤写了"写出字母表"，自动匹配"字母表概念")
           const [steps] = await pool.execute(
             "SELECT stepContent FROM problem_step WHERE problemId=? AND stepId=?",
-            [questionId, currentStepOrder]
+            [questionId, currentStepOrder],
           );
           if (steps.length > 0) {
             const stepContent = steps[0].stepContent;
             const [textRes] = await pool.execute(
               `SELECT * FROM knowledge WHERE ? LIKE CONCAT('%', REPLACE(knowledgeName, '概念', ''), '%') LIMIT 1`,
-              [stepContent]
+              [stepContent],
             );
             if (textRes.length > 0) {
               k = textRes;
@@ -148,27 +136,18 @@ async function executeStrategy(session, strategyId, userMessage) {
 
       if (k.length > 0) {
         const item = k[0];
-
-        // 🔴 新增：如果是推断出来的，改变话术，体现智能感
         let reply = item.isContextual
-          ? `💡 我猜你是在问当前任务相关的概念：\n\n🎓 **概念解析：${
-              item.knowledgeName
-            }**\n\n${item.domainExample || item.definition || ""}`
-          : `🎓 **概念解析：${item.knowledgeName}**\n\n${
-              item.domainExample || item.definition || ""
-            }`;
+          ? `💡 我猜你是在问当前任务相关的概念：\n\n🎓 **概念解析：${item.knowledgeName}**\n\n${item.domainExample || item.definition || ""}`
+          : `🎓 **概念解析：${item.knowledgeName}**\n\n${item.domainExample || item.definition || ""}`;
 
-        // 🖼 1. 处理讲义/参考图片
         if (item.ppt_loc) {
           const pptUrl = resolveMediaUrl(item.ppt_loc);
           reply += `\n\n---\n📖 **相关讲义/参考资料**：\n`;
-
           const isImage =
             item.ppt_loc.match(/\.(jpeg|jpg|gif|png|webp|bmp)$/i) ||
             item.ppt_loc.toLowerCase().includes("jpeg") ||
             item.ppt_loc.toLowerCase().includes("png") ||
             item.ppt_loc.toLowerCase().includes("img");
-
           if (isImage) {
             reply += `![讲义内容预览](${pptUrl})`;
           } else {
@@ -176,56 +155,40 @@ async function executeStrategy(session, strategyId, userMessage) {
           }
         }
 
-        // 🎥 2. 处理视频 (一律改为跳转链接)
         if (item.videoclip_id) {
           const videoUrl = resolveMediaUrl(item.videoclip_id);
-          const timeRange =
-            item.vsection_b && item.vsection_e
-              ? ` (建议观看时段: ${item.vsection_b} - ${item.vsection_e})`
-              : "";
-
-          reply += `\n\n🎬 **推荐微课视频**${timeRange}：\n`;
-          reply += `▶️[立即跳转观看视频](${videoUrl})`;
+          reply += `\n\n🎬 **推荐微课视频**：\n▶️[立即跳转观看视频](${videoUrl})`;
         }
-
         return reply;
       }
-      return "🤔 没找到相关概念。你能具体说明想了解哪个名词吗？（如：“什么是字母表”）";
+      return "🤔 没找到相关概念。你能具体说明想了解哪个名词吗？（如：“什么是字母表”？）";
 
     case "STRATEGY_GRADED_AID":
       const helpCount = counters["2"] || 0;
       if (helpCount <= 1) {
         const [steps] = await pool.execute(
           "SELECT stepExample FROM problem_step WHERE problemId = ? AND stepId = ?",
-          [questionId, currentStepOrder]
+          [questionId, currentStepOrder],
         );
-        if (steps.length > 0 && steps[0].stepExample) {
+        if (steps.length > 0 && steps[0].stepExample)
           return `📖 **类比提示**：\n\n${steps[0].stepExample}\n\n👉 这是一个类似的例子，你可以参考它的思路。`;
-        }
       }
       const [errors] = await pool.execute(
-        `
-        SELECT ss.stepContent, ss.stepComment FROM solution s
-        JOIN solution_step ss ON s.solutionId = ss.solutionId
-        WHERE s.problemId = ? AND s.isTypicalCase = 1 AND ss.stepId = ?
-        ORDER BY RAND() LIMIT 1
-      `,
-        [questionId, currentStepOrder]
+        `SELECT ss.stepContent, ss.stepComment FROM solution s JOIN solution_step ss ON s.solutionId = ss.solutionId WHERE s.problemId = ? AND s.isTypicalCase = 1 AND ss.stepId = ? ORDER BY RAND() LIMIT 1`,
+        [questionId, currentStepOrder],
       );
-      if (errors.length > 0) {
+      if (errors.length > 0)
         return `⚠️ **易错预警（往届典型错误）**：\n\n一位同学曾这样回答：\n> \`${errors[0].stepContent}\`\n\n助教点评：\n**${errors[0].stepComment}**\n\n请检查你是否也存在类似问题？`;
-      }
       return "💡 已经给出了所有参考信息，请结合前面的提示自己尝试思考，或进入下一步。";
 
     case "STRATEGY_STEP_GUIDE":
       const [stepInfo] = await pool.execute(
         "SELECT stepContent FROM problem_step WHERE problemId=? AND stepId=?",
-        [questionId, currentStepOrder]
+        [questionId, currentStepOrder],
       );
-      if (stepInfo.length > 0) {
-        return `👉 **当前任务 (Step ${currentStepOrder})**：\n${stepInfo[0].stepContent}`;
-      }
-      return "这一步的任务似乎还没定义。";
+      return stepInfo.length > 0
+        ? `👉 **当前任务 (Step ${currentStepOrder})**：\n${stepInfo[0].stepContent}`
+        : "这一步的任务似乎还没定义。";
 
     case "STRATEGY_EMOTION":
       const encouragement = getRandomWord("encouragements");
@@ -251,72 +214,73 @@ async function handleUserMessage(userId, message) {
     const getCurrentStepGuide = async (s) => {
       const [steps] = await pool.execute(
         "SELECT stepContent FROM problem_step WHERE problemId=? AND stepId=?",
-        [s.questionId, s.currentStepOrder]
+        [s.questionId, s.currentStepOrder],
       );
       return steps.length > 0 ? steps[0].stepContent : "暂无任务描述";
     };
 
+    let replyText = "";
+    let finalSchemeId = schemeId;
+    let finalCount = 0;
+
+    // 处理导航指令
     if (schemeId === 6) {
       session.currentStepOrder++;
       session.counters = {};
-      const stepContent = await getCurrentStepGuide(session);
-      return {
-        text: `${getRandomWord("navigation")} \n\n✅ 已经进入 **Step ${
-          session.currentStepOrder
-        }**。\n\n📢 **新任务**：\n${stepContent}`,
-        currentStep: session.currentStepOrder,
-      };
-    }
-    if (schemeId === 7) {
+      replyText = `${getRandomWord("navigation")} \n\n✅ 已经进入 **Step ${session.currentStepOrder}**。\n\n📢 **新任务**：\n${await getCurrentStepGuide(session)}`;
+    } else if (schemeId === 7) {
       if (session.currentStepOrder > 1) session.currentStepOrder--;
       session.counters = {};
-      const stepContent = await getCurrentStepGuide(session);
-      return {
-        text: `${getRandomWord("navigation")} \n\n👌 已回到 **Step ${
-          session.currentStepOrder
-        }**。\n\n📢 **任务回顾**：\n${stepContent}`,
-        currentStep: session.currentStepOrder,
-      };
-    }
-    if (schemeId === 8) {
+      replyText = `${getRandomWord("navigation")} \n\n👌 已回到 **Step ${session.currentStepOrder}**。\n\n📢 **任务回顾**：\n${await getCurrentStepGuide(session)}`;
+    } else if (schemeId === 8) {
       session.currentStepOrder = 1;
       session.counters = {};
-      const stepContent = await getCurrentStepGuide(session);
-      return {
-        text: `🔄 进度已重置。让我们从 **Step 1** 重新开始吧！\n\n📢 **初始任务**：\n${stepContent}`,
-        currentStep: 1,
-      };
+      replyText = `🔄 进度已重置。让我们从 **Step 1** 重新开始吧！\n\n📢 **初始任务**：\n${await getCurrentStepGuide(session)}`;
+    } else if (schemeId === 9) {
+      replyText = `${getRandomWord("greetings")}\n\n你当前正在执行 **Step ${session.currentStepOrder}**：\n> ${await getCurrentStepGuide(session)}\n\n需要我为你提供“提示”或者“概念解释”吗？`;
+    } else if (!schemeId) {
+      replyText = "🤔 我没太听懂，你可以问“这一步怎么做”或“给我个提示”。";
+    } else {
+      // 业务逻辑分支
+      if (!session.counters[schemeId]) session.counters[schemeId] = 0;
+      session.counters[schemeId]++;
+      finalCount = session.counters[schemeId];
+
+      const [schemes] = await pool.execute(
+        "SELECT * FROM inquiry_scheme WHERE schemeId = ?",
+        [schemeId],
+      );
+      if (schemes.length === 0)
+        return { text: "配置错误", currentStep: session.currentStepOrder };
+
+      const schemeData = schemes[0];
+      const targetStrategyId =
+        finalCount <= 1 ? schemeData.strategyId_1 : schemeData.strategyId_2;
+      const payload = schemeId === 1 && entity ? entity : message;
+      replyText = await executeStrategy(session, targetStrategyId, payload);
     }
-    if (schemeId === 9) {
-      const greeting = getRandomWord("greetings");
-      const stepContent = await getCurrentStepGuide(session);
-      return {
-        text: `${greeting}\n\n你当前正在执行 **Step ${session.currentStepOrder}**：\n> ${stepContent}\n\n需要我为你提供“提示”或者“概念解释”吗？`,
-        currentStep: session.currentStepOrder,
-      };
+
+    // 🔴 核心改进：插入交互记录（此处不再需要手动传 inquiryId，数据库会自动生成）
+    if (session.dbSessionId) {
+      try {
+        await pool.execute(
+          `INSERT INTO user_inquiry (sessionId, problemId, stepId, userContent, extractedEntity, schemeId, schemeOrder, response) 
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            session.dbSessionId,
+            session.questionId,
+            session.currentStepOrder,
+            message,
+            entity || null,
+            finalSchemeId,
+            finalCount,
+            replyText,
+          ],
+        );
+      } catch (dbErr) {
+        console.error("❌ [Log] Failed to save inquiry:", dbErr);
+      }
     }
-
-    if (!schemeId)
-      return {
-        text: "🤔 我没太听懂，你可以问“这一步怎么做”或“给我个提示”。",
-        currentStep: session.currentStepOrder,
-      };
-
-    if (!session.counters[schemeId]) session.counters[schemeId] = 0;
-    session.counters[schemeId]++;
-    const count = session.counters[schemeId];
-    const [schemes] = await pool.execute(
-      "SELECT * FROM inquiry_scheme WHERE schemeId = ?",
-      [schemeId]
-    );
-    if (schemes.length === 0)
-      return { text: "配置错误", currentStep: session.currentStepOrder };
-
-    const schemeData = schemes[0];
-    const targetStrategyId =
-      count <= 1 ? schemeData.strategyId_1 : schemeData.strategyId_2;
-    const payload = schemeId === 1 && entity ? entity : message;
-    const replyText = await executeStrategy(session, targetStrategyId, payload);
 
     return { text: replyText, currentStep: session.currentStepOrder };
   } catch (e) {
@@ -331,14 +295,22 @@ app.post("/api/init", async (req, res) => {
   session.questionId = questionId || 1;
   session.currentStepOrder = 1;
   session.counters = {};
+
   try {
+    // 🔴 创建会话记录
+    const [sessRes] = await pool.execute(
+      "INSERT INTO session (userId) VALUES (?)",
+      [999],
+    );
+    session.dbSessionId = sessRes.insertId;
+
     const [probs] = await pool.execute(
       "SELECT title FROM problem WHERE problemId=?",
-      [session.questionId]
+      [session.questionId],
     );
     const [steps] = await pool.execute(
       "SELECT stepContent FROM problem_step WHERE problemId=? AND stepId=1",
-      [session.questionId]
+      [session.questionId],
     );
     const systemMsg = `👋 嗨！我是你的智能助教。\n\n📚 **当前任务**：\n> ${probs[0].title}\n\n让我们开始 **Step 1**：\n${steps[0].stepContent}\n\n你可以随时向我求助！`;
     res.json({ systemMsg, currentStep: 1 });
