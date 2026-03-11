@@ -140,7 +140,7 @@ async function executeStrategy(session, strategyId, userMessage) {
           ? `💡 我猜你是在问当前任务相关的概念：\n\n🎓 **概念解析：${item.knowledgeName}**\n\n${item.domainExample || item.definition || ""}`
           : `🎓 **概念解析：${item.knowledgeName}**\n\n${item.domainExample || item.definition || ""}`;
 
-        // 🖼 1. 处理讲义/参考图片 (🔴 优化：支持中英文逗号分割的多张图片)
+        // 🖼 1. 处理讲义/参考图片
         if (item.ppt_loc) {
           reply += `\n\n---\n📖 **相关讲义/参考资料**：\n`;
           const locs = item.ppt_loc.split(/,|，/);
@@ -163,7 +163,7 @@ async function executeStrategy(session, strategyId, userMessage) {
           });
         }
 
-        // 🎥 2. 处理视频 (🔴 优化：支持多个视频链接分割跳转)
+        // 🎥 2. 处理视频
         if (item.videoclip_id) {
           reply += `\n\n🎬 **推荐微课视频**：\n`;
           const vids = item.videoclip_id.split(/,|，/);
@@ -172,7 +172,6 @@ async function executeStrategy(session, strategyId, userMessage) {
             if (!trimmedVid) return;
             const videoUrl = resolveMediaUrl(trimmedVid);
 
-            // 如果只有单视频且有时间段，显示时间段
             const timeRange =
               item.vsection_b && item.vsection_e && vids.length === 1
                 ? ` (建议观看: ${item.vsection_b} - ${item.vsection_e})`
@@ -196,7 +195,6 @@ async function executeStrategy(session, strategyId, userMessage) {
           const exampleData = steps[0].stepExample.trim();
           let renderedExample = "";
 
-          // 🔴 智能探针：判断 stepExample 是否全是图片链接/图片文件名 (由逗号分割)
           const isPureMedia = exampleData.split(/,|，/).every((p) => {
             let pt = p.trim();
             return (
@@ -223,7 +221,6 @@ async function executeStrategy(session, strategyId, userMessage) {
               }
             });
           } else {
-            // 如果是普通文本（或者本身包含 Markdown 代码的文本），直接原样输出
             renderedExample = exampleData;
           }
 
@@ -345,6 +342,19 @@ async function handleUserMessage(userId, message) {
   }
 }
 
+// 🟢 新增：获取数据库中所有的题目列表
+app.get("/api/problems", async (req, res) => {
+  try {
+    const [probs] = await pool.execute(
+      "SELECT problemId, title FROM problem ORDER BY problemId ASC",
+    );
+    res.json(probs);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "获取题目列表失败" });
+  }
+});
+
 app.post("/api/init", async (req, res) => {
   const { userId, questionId } = req.body;
   const session = getSession(userId);
@@ -367,7 +377,7 @@ app.post("/api/init", async (req, res) => {
       "SELECT stepContent FROM problem_step WHERE problemId=? AND stepId=1",
       [session.questionId],
     );
-    const systemMsg = `👋 嗨！我是你的智能助教。\n\n📚 **当前任务**：\n> ${probs[0].title}\n\n让我们开始 **Step 1**：\n${steps[0].stepContent}\n\n你可以随时向我求助！`;
+    const systemMsg = `👋 嗨！我是你的智能助教。\n\n📚 **当前任务**：\n> ${probs[0]?.title || "未知题目"}\n\n让我们开始 **Step 1**：\n${steps[0]?.stepContent || "没有找到步骤信息"}\n\n你可以随时向我求助！`;
     res.json({ systemMsg, currentStep: 1 });
   } catch (e) {
     res.status(500).json({ error: "Init Error" });
