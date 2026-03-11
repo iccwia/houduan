@@ -140,24 +140,46 @@ async function executeStrategy(session, strategyId, userMessage) {
           ? `💡 我猜你是在问当前任务相关的概念：\n\n🎓 **概念解析：${item.knowledgeName}**\n\n${item.domainExample || item.definition || ""}`
           : `🎓 **概念解析：${item.knowledgeName}**\n\n${item.domainExample || item.definition || ""}`;
 
+        // 🖼 1. 处理讲义/参考图片 (🔴 优化：支持中英文逗号分割的多张图片)
         if (item.ppt_loc) {
-          const pptUrl = resolveMediaUrl(item.ppt_loc);
           reply += `\n\n---\n📖 **相关讲义/参考资料**：\n`;
-          const isImage =
-            item.ppt_loc.match(/\.(jpeg|jpg|gif|png|webp|bmp)$/i) ||
-            item.ppt_loc.toLowerCase().includes("jpeg") ||
-            item.ppt_loc.toLowerCase().includes("png") ||
-            item.ppt_loc.toLowerCase().includes("img");
-          if (isImage) {
-            reply += `![讲义内容预览](${pptUrl})`;
-          } else {
-            reply += `🔗[点击查看详细资料页面](${pptUrl})`;
-          }
+          const locs = item.ppt_loc.split(/,|，/);
+
+          locs.forEach((loc) => {
+            const trimmedLoc = loc.trim();
+            if (!trimmedLoc) return;
+            const pptUrl = resolveMediaUrl(trimmedLoc);
+            const isImage =
+              trimmedLoc.match(/\.(jpeg|jpg|gif|png|webp|bmp)$/i) ||
+              trimmedLoc.toLowerCase().includes("jpeg") ||
+              trimmedLoc.toLowerCase().includes("png") ||
+              trimmedLoc.toLowerCase().includes("img");
+
+            if (isImage) {
+              reply += `\n![讲义内容预览](${pptUrl})\n`;
+            } else {
+              reply += `\n🔗[点击查看详细资料页面](${pptUrl})\n`;
+            }
+          });
         }
 
+        // 🎥 2. 处理视频 (🔴 优化：支持多个视频链接分割跳转)
         if (item.videoclip_id) {
-          const videoUrl = resolveMediaUrl(item.videoclip_id);
-          reply += `\n\n🎬 **推荐微课视频**：\n▶️[立即跳转观看视频](${videoUrl})`;
+          reply += `\n\n🎬 **推荐微课视频**：\n`;
+          const vids = item.videoclip_id.split(/,|，/);
+          vids.forEach((vid, index) => {
+            const trimmedVid = vid.trim();
+            if (!trimmedVid) return;
+            const videoUrl = resolveMediaUrl(trimmedVid);
+
+            // 如果只有单视频且有时间段，显示时间段
+            const timeRange =
+              item.vsection_b && item.vsection_e && vids.length === 1
+                ? ` (建议观看: ${item.vsection_b} - ${item.vsection_e})`
+                : "";
+
+            reply += `▶️[立即跳转观看视频 ${vids.length > 1 ? index + 1 : ""}${timeRange}](${videoUrl})\n`;
+          });
         }
         return reply;
       }
@@ -170,8 +192,43 @@ async function executeStrategy(session, strategyId, userMessage) {
           "SELECT stepExample FROM problem_step WHERE problemId = ? AND stepId = ?",
           [questionId, currentStepOrder],
         );
-        if (steps.length > 0 && steps[0].stepExample)
-          return `📖 **类比提示**：\n\n${steps[0].stepExample}\n\n👉 这是一个类似的例子，你可以参考它的思路。`;
+        if (steps.length > 0 && steps[0].stepExample) {
+          const exampleData = steps[0].stepExample.trim();
+          let renderedExample = "";
+
+          // 🔴 智能探针：判断 stepExample 是否全是图片链接/图片文件名 (由逗号分割)
+          const isPureMedia = exampleData.split(/,|，/).every((p) => {
+            let pt = p.trim();
+            return (
+              pt.startsWith("http") ||
+              pt.match(/\.(jpeg|jpg|gif|png|webp|bmp)$/i)
+            );
+          });
+
+          if (isPureMedia && exampleData.length > 0) {
+            const parts = exampleData.split(/,|，/);
+            parts.forEach((p) => {
+              let pt = p.trim();
+              if (!pt) return;
+              let url = resolveMediaUrl(pt);
+              let isImg =
+                pt.match(/\.(jpeg|jpg|gif|png|webp|bmp)$/i) ||
+                pt.toLowerCase().includes("jpeg") ||
+                pt.toLowerCase().includes("png") ||
+                pt.toLowerCase().includes("img");
+              if (isImg) {
+                renderedExample += `\n![类比提示图片](${url})\n`;
+              } else {
+                renderedExample += `\n🔗[查看类比提示资料](${url})\n`;
+              }
+            });
+          } else {
+            // 如果是普通文本（或者本身包含 Markdown 代码的文本），直接原样输出
+            renderedExample = exampleData;
+          }
+
+          return `📖 **类比提示**：\n\n${renderedExample}\n\n👉 这是一个类似的例子，你可以参考它的思路。`;
+        }
       }
       const [errors] = await pool.execute(
         `SELECT ss.stepContent, ss.stepComment FROM solution s JOIN solution_step ss ON s.solutionId = ss.solutionId WHERE s.problemId = ? AND s.isTypicalCase = 1 AND ss.stepId = ? ORDER BY RAND() LIMIT 1`,
@@ -241,7 +298,6 @@ async function handleUserMessage(userId, message) {
     } else if (!schemeId) {
       replyText = "🤔 我没太听懂，你可以问“这一步怎么做”或“给我个提示”。";
     } else {
-      // 业务逻辑分支
       if (!session.counters[schemeId]) session.counters[schemeId] = 0;
       session.counters[schemeId]++;
       finalCount = session.counters[schemeId];
@@ -260,7 +316,7 @@ async function handleUserMessage(userId, message) {
       replyText = await executeStrategy(session, targetStrategyId, payload);
     }
 
-    // 🔴 核心改进：插入交互记录（此处不再需要手动传 inquiryId，数据库会自动生成）
+    // 🔴 插入交互记录
     if (session.dbSessionId) {
       try {
         await pool.execute(
@@ -297,7 +353,6 @@ app.post("/api/init", async (req, res) => {
   session.counters = {};
 
   try {
-    // 🔴 创建会话记录
     const [sessRes] = await pool.execute(
       "INSERT INTO session (userId) VALUES (?)",
       [999],
